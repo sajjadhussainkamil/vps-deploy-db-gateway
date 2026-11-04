@@ -1,0 +1,21 @@
+{
+  "name": "db-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Stateless per-server gateway that runs database operations for the platform. Stores nothing.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "postgres": "3.4.9",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "typescript": "5.9.3"
+  }
+}
