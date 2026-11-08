@@ -4,7 +4,7 @@
  */
 import { randomBytes } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, rm, statfs } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Transform, type Readable } from 'node:stream'
@@ -13,6 +13,11 @@ import { GatewayError, notFound } from './errors.js'
 
 export const UPLOAD_ROOT = process.env.GATEWAY_UPLOAD_ROOT || path.join(tmpdir(), 'gateway-uploads')
 const KEEP_MS = 2 * 60 * 60_000
+/** Disk left for the databases on the same server once a file has arrived. */
+export const SPARE_BYTES = 2 * 2 ** 30
+/** Files arriving at the same time; each can be gigabytes. */
+export const MAX_UPLOADS = 2
+let receiving = 0
 /** What pg_dump --format=custom writes first. */
 export const DUMP_MAGIC = Buffer.from('PGDMP')
 
@@ -31,6 +36,22 @@ async function forget(now = Date.now()): Promise<void> {
       uploads.delete(id)
       await rm(u.path, { force: true }).catch(() => undefined)
     }
+  }
+}
+
+// Files whose restore never started are gone within two hours, even with no new upload.
+setInterval(() => void forget(), 10 * 60_000).unref()
+
+/** Free bytes where uploads are kept. */
+export async function freeBytes(dir: string): Promise<number> {
+  const s = await statfs(dir)
+  return Number(s.bavail) * Number(s.bsize)
+}
+
+/** Refuses a file the disk cannot hold with room to spare, before a byte is written. */
+export function assertRoom(free: number, bytes: number | undefined): void {
+  if (free - (bytes ?? 0) < SPARE_BYTES) {
+    throw new GatewayError(507, 'too_large', 'The server does not have enough free disk for this file right now. Try again later or contact support.')
   }
 }
 
@@ -59,12 +80,24 @@ export function dumpGuard(maxBytes: number): Transform & { bytes: () => number }
 }
 
 /** Writes the request body to disk and answers with the id the restore asks for. */
-export async function receiveUpload(body: Readable, sub: string, maxBytes: number): Promise<{ upload: string; size: number }> {
+export async function receiveUpload(body: Readable, sub: string, maxBytes: number, bytes?: number): Promise<{ upload: string; size: number }> {
+  if (receiving >= MAX_UPLOADS) throw new GatewayError(503, 'busy', 'Another file is being received. Try again in a few minutes.')
+  receiving++
+  try {
+    return await receive(body, sub, maxBytes, bytes)
+  } finally {
+    receiving--
+  }
+}
+
+async function receive(body: Readable, sub: string, maxBytes: number, bytes?: number): Promise<{ upload: string; size: number }> {
   await forget()
   await mkdir(UPLOAD_ROOT, { recursive: true, mode: 0o700 })
+  assertRoom(await freeBytes(UPLOAD_ROOT), bytes)
   const id = randomBytes(12).toString('hex')
   const file = path.join(UPLOAD_ROOT, `${id}.dump`)
-  const guard = dumpGuard(maxBytes)
+  // A declared size is a promise: more than that is refused as well.
+  const guard = dumpGuard(bytes ? Math.min(maxBytes, bytes) : maxBytes)
   try {
     // The request stays out of the pipeline, so a refusal can still be answered on it.
     const writing = pipeline(guard, createWriteStream(file, { mode: 0o600 }))
