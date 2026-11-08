@@ -3,11 +3,13 @@ import { constants, createReadStream } from 'node:fs'
 import { access } from 'node:fs/promises'
 import { BACKUP_ROOT } from './backup-files.js'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { handle, verifyDownload, type HandlerConfig } from './handle.js'
+import { handle, verifyDownload, verifyUpload, type HandlerConfig } from './handle.js'
+import { toWire } from './errors.js'
+import { receiveUpload } from './uploads.js'
 
 /** Raised when the gateway learns something the portal must check for before offering it. */
-export const GATEWAY_VERSION = 3
-const FEATURES = ['restore', 'download']
+export const GATEWAY_VERSION = 4
+const FEATURES = ['restore', 'download', 'upload']
 
 /** Restore and download need Coolify's backups folder mounted and readable. */
 async function backupsReadable(): Promise<boolean> {
@@ -77,6 +79,20 @@ function main(): void {
         stream.pipe(res)
         return
       }
+      if (req.method === 'POST' && req.url === '/upload') {
+        const auth = verifyUpload(bearer(req), cfg)
+        if (!auth.ok) return send(res, auth.status, { ok: false, error: auth.error })
+        try {
+          const out = await receiveUpload(req, auth.sub, auth.maxBytes)
+          cfg.log?.({ ts: new Date().toISOString(), op: 'upload', dbId: auth.sub, bytes: out.size, ok: true })
+          return send(res, 200, { ok: true, data: out })
+        } catch (err) {
+          const wire = toWire(err)
+          // The rest of a refused body is not read, so the connection closes after the answer.
+          res.setHeader('connection', 'close')
+          return send(res, wire.status, { ok: false, error: wire.error })
+        }
+      }
       if (req.method !== 'POST' || (req.url !== '/op' && req.url !== '/batch')) return send(res, 404, { ok: false, error: { code: 'not_found', message: 'Not found' } })
 
       // A small cap keeps one busy portal from queueing the box into the ground.
@@ -107,7 +123,8 @@ function main(): void {
     }
   })
   server.headersTimeout = 10_000
-  server.requestTimeout = 150_000
+  // Long enough for a large backup file to arrive; /op bodies are capped at 8 MB anyway.
+  server.requestTimeout = 30 * 60_000
   server.listen(cfg.port, () => process.stdout.write(`${JSON.stringify({ ts: new Date().toISOString(), msg: 'db-gateway listening', port: cfg.port })}\n`))
 
   const stop = () => server.close(() => process.exit(0))

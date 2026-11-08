@@ -56,6 +56,20 @@ export async function handle(token: string, input: unknown, cfg: HandlerConfig):
 }
 
 const DOWNLOAD_OPS: ReadonlySet<string> = new Set(['download'])
+const UPLOAD_OPS: ReadonlySet<string> = new Set(['upload'])
+
+/** An upload token names the database and the size it may take; the claims come back, or the wire refusal. */
+export function verifyUpload(token: string, cfg: HandlerConfig): { ok: true; sub: string; maxBytes: number } | { ok: false; status: number; error: WireError } {
+  try {
+    const claims = verifyToken(token, { secret: cfg.secret, audience: cfg.audience, allowedOps: UPLOAD_OPS, now: cfg.now?.() })
+    if (!claims.upload) throw forbidden('No upload size was given')
+    return { ok: true, sub: claims.sub, maxBytes: claims.upload.maxBytes }
+  } catch (err) {
+    const wire = toWire(err)
+    cfg.log?.({ ts: new Date().toISOString(), op: 'upload', ok: false, code: wire.error.code })
+    return { ok: false, status: wire.status, error: wire.error }
+  }
+}
 
 /** A download token names its file; the checked path and size come back, or the wire refusal. */
 export async function verifyDownload(

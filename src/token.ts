@@ -38,6 +38,8 @@ const claimsSchema = z.object({
   recoveryOnly: z.boolean().optional(),
   // A backup file for restore and download, and the database it belongs to (its 24-character Coolify uuid).
   file: z.object({ path: z.string().min(1).max(1024), owner: z.string().regex(/^[a-z0-9]{24}$/) }).optional(),
+  // The most a customer's backup file may weigh when it is sent in.
+  upload: z.object({ maxBytes: z.number().int().min(1).max(21_474_836_480) }).optional(),
 })
 export type Claims = z.infer<typeof claimsSchema>
 
