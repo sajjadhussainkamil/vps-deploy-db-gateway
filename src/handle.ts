@@ -2,6 +2,7 @@
  * Runs one request: verify the token, check the target, validate the input, run the operation.
  * Kept free of HTTP so every refusal can be tested without a server or a database.
  */
+import { assertBackupFile } from './backup-files.js'
 import { forbidden, toWire, badRequest, GatewayError, type WireError } from './errors.js'
 import { ALLOWED_OPS, OPS } from './ops/index.js'
 import { assertRecoveryAllowed } from './recovery.js'
@@ -51,5 +52,24 @@ export async function handle(token: string, input: unknown, cfg: HandlerConfig):
     // Only the operation, the database id and a code are logged: never a target, a token, SQL or rows.
     cfg.log?.({ ts: new Date().toISOString(), op, dbId: sub, ms: Date.now() - started, ok: false, code: wire.error.code })
     return { ok: false, status: wire.status, error: wire.error, sub }
+  }
+}
+
+const DOWNLOAD_OPS: ReadonlySet<string> = new Set(['download'])
+
+/** A download token names its file; the checked path and size come back, or the wire refusal. */
+export async function verifyDownload(
+  token: string,
+  cfg: HandlerConfig
+): Promise<{ ok: true; path: string; size: number; sub: string } | { ok: false; status: number; error: WireError }> {
+  try {
+    const claims = verifyToken(token, { secret: cfg.secret, audience: cfg.audience, allowedOps: DOWNLOAD_OPS, now: cfg.now?.() })
+    const file = await assertBackupFile(claims.file)
+    cfg.log?.({ ts: new Date().toISOString(), op: 'download', dbId: claims.sub, ok: true })
+    return { ok: true, path: file.path, size: file.size, sub: claims.sub }
+  } catch (err) {
+    const wire = toWire(err)
+    cfg.log?.({ ts: new Date().toISOString(), op: 'download', ok: false, code: wire.error.code })
+    return { ok: false, status: wire.status, error: wire.error }
   }
 }

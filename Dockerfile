@@ -9,6 +9,8 @@ RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine
 ENV NODE_ENV=production
+# pg_restore and psql for restoring and copying databases; 17 reads dumps from every supported server.
+RUN apk add --no-cache postgresql17-client
 WORKDIR /app
 # Nothing to write to disk, and nothing running as root.
 COPY --from=build /app/node_modules ./node_modules

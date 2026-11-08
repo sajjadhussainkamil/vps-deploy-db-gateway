@@ -1,6 +1,11 @@
-/** The gateway's HTTP face: /healthz, /op and /batch. All the real work is in handle.ts. */
+/** The gateway's HTTP face: /healthz, /op, /batch and /download. All the real work is in handle.ts. */
+import { createReadStream } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { handle, type HandlerConfig } from './handle.js'
+import { handle, verifyDownload, type HandlerConfig } from './handle.js'
+
+/** Raised when the gateway learns something the portal must check for before offering it. */
+export const GATEWAY_VERSION = 2
+const FEATURES = ['restore', 'download']
 
 // Room for a CSV import; most requests are tiny.
 const MAX_BODY = 8 * 1024 * 1024
@@ -47,7 +52,16 @@ function main(): void {
 
   const server = createServer(async (req, res) => {
     try {
-      if (req.method === 'GET' && req.url === '/healthz') return send(res, 200, { ok: true })
+      if (req.method === 'GET' && req.url === '/healthz') return send(res, 200, { ok: true, version: GATEWAY_VERSION, features: FEATURES })
+      if (req.method === 'POST' && req.url === '/download') {
+        const file = await verifyDownload(bearer(req), cfg)
+        if (!file.ok) return send(res, file.status, { ok: false, error: file.error })
+        res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': file.size, 'cache-control': 'no-store' })
+        const stream = createReadStream(file.path)
+        stream.on('error', () => res.destroy())
+        stream.pipe(res)
+        return
+      }
       if (req.method !== 'POST' || (req.url !== '/op' && req.url !== '/batch')) return send(res, 404, { ok: false, error: { code: 'not_found', message: 'Not found' } })
 
       // A small cap keeps one busy portal from queueing the box into the ground.

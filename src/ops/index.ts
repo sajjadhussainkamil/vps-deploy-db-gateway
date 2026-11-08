@@ -5,6 +5,7 @@ import { ddl } from './ddl.js'
 import { extension } from './extension.js'
 import { importRows } from './import.js'
 import { health, schema, stats } from './inspect.js'
+import { restore, restoreStatus } from './restore.js'
 import type { Op } from './types.js'
 
 /** Every operation the gateway will run. A token naming anything else is refused before it is read further. */
@@ -25,6 +26,8 @@ export const OPS: Record<string, Op> = {
   ddl,
   import: importRows,
   extension,
+  restore,
+  restore_status: restoreStatus,
 }
 
 export const ALLOWED_OPS: ReadonlySet<string> = new Set(Object.keys(OPS))
