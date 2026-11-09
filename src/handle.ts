@@ -4,10 +4,11 @@
  */
 import { assertBackupFile } from './backup-files.js'
 import { forbidden, toWire, badRequest, GatewayError, type WireError } from './errors.js'
-import { ALLOWED_OPS, OPS } from './ops/index.js'
+import { ALL_OPS, opsFor } from './engines/index.js'
+import { assertRecoveryAllowed as assertMysqlRecoveryAllowed } from './engines/mysql/recovery.js'
 import { assertRecoveryAllowed } from './recovery.js'
 import { assertTargetAllowed, type TargetPolicy } from './target.js'
-import { verifyToken } from './token.js'
+import { verifyToken, type Claims } from './token.js'
 
 export interface HandlerConfig {
   secret: string
@@ -25,20 +26,20 @@ export async function handle(token: string, input: unknown, cfg: HandlerConfig):
   let sub: string | undefined
   let op = 'unknown'
   try {
-    const claims = verifyToken(token, { secret: cfg.secret, audience: cfg.audience, allowedOps: ALLOWED_OPS, now: cfg.now?.() })
+    const claims = verifyToken(token, { secret: cfg.secret, audience: cfg.audience, allowedOps: ALL_OPS, now: cfg.now?.() })
     sub = claims.sub
     op = claims.op
-    const def = OPS[claims.op]
+    const def = opsFor(claims.engine)[claims.op]
     if (!def) throw forbidden('Operation not allowed')
     if (def.mode === 'write' && claims.readOnly) throw new GatewayError(403, 'read_only_mode', 'Writing is switched off for this request')
 
     // After the signature and before any connection: a forged or stolen token cannot aim the gateway elsewhere.
-    const address = await assertTargetAllowed(claims.target, cfg.policy)
+    const address = await assertTargetAllowed(claims.target, cfg.policy, claims.engine)
 
     const parsed = def.input.safeParse(input ?? {})
     if (!parsed.success) throw badRequest(parsed.error.issues[0]?.message ?? 'Invalid request')
 
-    if (claims.recoveryOnly) assertRecoveryAllowed(claims.op, parsed.data)
+    if (claims.recoveryOnly) (claims.engine === 'mysql' ? assertMysqlRecoveryAllowed : assertRecoveryAllowed)(claims.op, parsed.data)
 
     const data = await def.run({ claims, address, input: parsed.data })
     const size = Buffer.byteLength(JSON.stringify(data ?? null))
@@ -59,11 +60,11 @@ const DOWNLOAD_OPS: ReadonlySet<string> = new Set(['download'])
 const UPLOAD_OPS: ReadonlySet<string> = new Set(['upload'])
 
 /** An upload token names the database and the size it may take; the claims come back, or the wire refusal. */
-export function verifyUpload(token: string, cfg: HandlerConfig): { ok: true; sub: string; maxBytes: number; bytes?: number } | { ok: false; status: number; error: WireError } {
+export function verifyUpload(token: string, cfg: HandlerConfig): { ok: true; sub: string; maxBytes: number; bytes?: number; engine: Claims['engine'] } | { ok: false; status: number; error: WireError } {
   try {
     const claims = verifyToken(token, { secret: cfg.secret, audience: cfg.audience, allowedOps: UPLOAD_OPS, now: cfg.now?.() })
     if (!claims.upload) throw forbidden('No upload size was given')
-    return { ok: true, sub: claims.sub, maxBytes: claims.upload.maxBytes, bytes: claims.upload.bytes }
+    return { ok: true, sub: claims.sub, maxBytes: claims.upload.maxBytes, bytes: claims.upload.bytes, engine: claims.engine }
   } catch (err) {
     const wire = toWire(err)
     cfg.log?.({ ts: new Date().toISOString(), op: 'upload', ok: false, code: wire.error.code })
@@ -78,7 +79,7 @@ export async function verifyDownload(
 ): Promise<{ ok: true; path: string; size: number; sub: string } | { ok: false; status: number; error: WireError }> {
   try {
     const claims = verifyToken(token, { secret: cfg.secret, audience: cfg.audience, allowedOps: DOWNLOAD_OPS, now: cfg.now?.() })
-    const file = await assertBackupFile(claims.file)
+    const file = await assertBackupFile(claims.file, undefined, claims.engine)
     cfg.log?.({ ts: new Date().toISOString(), op: 'download', dbId: claims.sub, ok: true })
     return { ok: true, path: file.path, size: file.size, sub: claims.sub }
   } catch (err) {

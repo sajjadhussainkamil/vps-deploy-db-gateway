@@ -1,7 +1,7 @@
 /**
  * Where the gateway may connect. The token names the database, so a stolen or forged token must
  * never be able to point the gateway at anything else: only Coolify database containers, only
- * Postgres' port, only addresses on the private network.
+ * the engine's own port, only addresses on the private network.
  */
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
@@ -11,6 +11,7 @@ import type { Target } from './token.js'
 /** Coolify names a database container by its 24-character resource uuid. */
 const HOST_RE = /^[a-z0-9]{24}$/
 export const POSTGRES_PORT = 5432
+export const MYSQL_PORT = 3306
 
 function ipv4ToInt(ip: string): number {
   return ip.split('.').reduce((acc, o) => (acc << 8) + Number(o), 0) >>> 0
@@ -45,9 +46,9 @@ const defaultResolve = async (host: string) => (await lookup(host, { all: true }
  * Throws unless the target is a database container on the private network. No connection is made
  * first. Returns the checked address, which is what the connection must use.
  */
-export async function assertTargetAllowed(target: Target, policy: TargetPolicy = {}): Promise<string> {
+export async function assertTargetAllowed(target: Target, policy: TargetPolicy = {}, engine: 'postgresql' | 'mysql' = 'postgresql'): Promise<string> {
   if (!HOST_RE.test(target.host)) throw forbidden('That database address is not allowed')
-  if (target.port !== POSTGRES_PORT) throw forbidden('That database port is not allowed')
+  if (target.port !== (engine === 'mysql' ? MYSQL_PORT : POSTGRES_PORT)) throw forbidden('That database port is not allowed')
 
   let addresses: string[]
   try {

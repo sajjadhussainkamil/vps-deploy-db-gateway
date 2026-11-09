@@ -9,8 +9,8 @@ import { forbidden } from './errors.js'
 const targetSchema = z.object({
   host: z.string().min(1).max(253),
   port: z.number().int(),
-  db: z.string().min(1).max(63),
-  user: z.string().min(1).max(63),
+  db: z.string().min(1).max(64),
+  user: z.string().min(1).max(64),
   password: z.string().min(1).max(512),
 })
 export type Target = z.infer<typeof targetSchema>
@@ -23,6 +23,7 @@ const claimsSchema = z.object({
   iat: z.number(),
   exp: z.number(),
   jti: z.string().min(8).max(64),
+  engine: z.enum(['postgresql', 'mysql']).default('postgresql'),
   target: targetSchema,
   // The app role, so a stats call can see what a fresh application session would see.
   probe: targetSchema.pick({ user: true, password: true }).optional(),

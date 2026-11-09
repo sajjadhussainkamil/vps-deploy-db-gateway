@@ -8,7 +8,7 @@ import { toWire } from './errors.js'
 import { receiveUpload } from './uploads.js'
 
 /** Raised when the gateway learns something the portal must check for before offering it. */
-export const GATEWAY_VERSION = 5
+export const GATEWAY_VERSION = 6
 const FEATURES = ['restore', 'download', 'upload']
 
 /** Restore and download need Coolify's backups folder mounted and readable. */
@@ -71,7 +71,7 @@ function main(): void {
     try {
       if (req.method === 'GET' && req.url === '/healthz') {
         const backups = await backupsReadable()
-        return send(res, 200, { ok: true, version: GATEWAY_VERSION, backups, features: backups ? FEATURES : [] })
+        return send(res, 200, { ok: true, version: GATEWAY_VERSION, backups, features: [...(backups ? FEATURES : []), 'mysql'] })
       }
       if (req.method === 'POST' && req.url === '/download') {
         if (downloading >= MAX_DOWNLOADS) return send(res, 503, { ok: false, error: { code: 'busy', message: 'The gateway is busy, try again' } })
@@ -89,7 +89,7 @@ function main(): void {
         const auth = verifyUpload(bearer(req), cfg)
         if (!auth.ok) return send(res, auth.status, { ok: false, error: auth.error })
         try {
-          const out = await receiveUpload(req, auth.sub, auth.maxBytes, auth.bytes)
+          const out = await receiveUpload(req, auth.sub, auth.maxBytes, auth.bytes, auth.engine)
           cfg.log?.({ ts: new Date().toISOString(), op: 'upload', dbId: auth.sub, bytes: out.size, ok: true })
           return send(res, 200, { ok: true, data: out })
         } catch (err) {

@@ -1,6 +1,6 @@
 /**
  * Dump files sent in by a customer, kept in the gateway's own temporary folder until their restore
- * ends. Only PostgreSQL custom-format dumps are taken, and each belongs to the one database it was sent for.
+ * ends. Only real dumps of the database's own engine are taken, and each belongs to the one database it was sent for.
  */
 import { randomBytes } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
@@ -20,6 +20,18 @@ export const MAX_UPLOADS = 2
 let receiving = 0
 /** What pg_dump --format=custom writes first. */
 export const DUMP_MAGIC = Buffer.from('PGDMP')
+/** A MySQL dump is plain SQL or gzip; this much of the start shows which, or that it is neither. */
+const MYSQL_HEAD = 4096
+const GZIP_MAGIC = [0x1f, 0x8b]
+
+type Engine = 'postgresql' | 'mysql'
+
+const notMysql = () => new GatewayError(400, 'bad_request', 'This is not a MySQL backup file. Use a .sql file downloaded from Backups, or one made with mysqldump.')
+
+function assertMysqlHead(head: Buffer): void {
+  if (head[0] === GZIP_MAGIC[0] && head[1] === GZIP_MAGIC[1]) return
+  if (head.includes(0)) throw notMysql()
+}
 
 interface Upload {
   sub: string
@@ -56,7 +68,8 @@ export function assertRoom(free: number, bytes: number | undefined): void {
 }
 
 /** Counts and checks the bytes on their way to disk, so a wrong or oversized file stops early. */
-export function dumpGuard(maxBytes: number): Transform & { bytes: () => number } {
+export function dumpGuard(maxBytes: number, engine: Engine = 'postgresql'): Transform & { bytes: () => number } {
+  if (engine === 'mysql') return mysqlGuard(maxBytes)
   let size = 0
   let head = Buffer.alloc(0)
   const guard = new Transform({
@@ -79,25 +92,61 @@ export function dumpGuard(maxBytes: number): Transform & { bytes: () => number }
   return Object.assign(guard, { bytes: () => size })
 }
 
+function mysqlGuard(maxBytes: number): Transform & { bytes: () => number } {
+  let size = 0
+  let head = Buffer.alloc(0)
+  let checked = false
+  const guard = new Transform({
+    transform(chunk: Buffer, _enc, done) {
+      size += chunk.length
+      if (size > maxBytes) return done(new GatewayError(413, 'too_large', `The file is larger than this database's ${Math.floor(maxBytes / 2 ** 20)} MB limit`))
+      if (!checked) {
+        head = Buffer.concat([head, chunk]).subarray(0, MYSQL_HEAD)
+        if (head.length === MYSQL_HEAD) {
+          checked = true
+          try {
+            assertMysqlHead(head)
+          } catch (e) {
+            return done(e as Error)
+          }
+        }
+      }
+      done(null, chunk)
+    },
+    flush(done) {
+      if (size === 0) return done(new GatewayError(400, 'bad_request', 'The file is empty'))
+      if (!checked) {
+        try {
+          assertMysqlHead(head)
+        } catch (e) {
+          return done(e as Error)
+        }
+      }
+      done()
+    },
+  })
+  return Object.assign(guard, { bytes: () => size })
+}
+
 /** Writes the request body to disk and answers with the id the restore asks for. */
-export async function receiveUpload(body: Readable, sub: string, maxBytes: number, bytes?: number): Promise<{ upload: string; size: number }> {
+export async function receiveUpload(body: Readable, sub: string, maxBytes: number, bytes?: number, engine: Engine = 'postgresql'): Promise<{ upload: string; size: number }> {
   if (receiving >= MAX_UPLOADS) throw new GatewayError(503, 'busy', 'Another file is being received. Try again in a few minutes.')
   receiving++
   try {
-    return await receive(body, sub, maxBytes, bytes)
+    return await receive(body, sub, maxBytes, bytes, engine)
   } finally {
     receiving--
   }
 }
 
-async function receive(body: Readable, sub: string, maxBytes: number, bytes?: number): Promise<{ upload: string; size: number }> {
+async function receive(body: Readable, sub: string, maxBytes: number, bytes: number | undefined, engine: Engine): Promise<{ upload: string; size: number }> {
   await forget()
   await mkdir(UPLOAD_ROOT, { recursive: true, mode: 0o700 })
   assertRoom(await freeBytes(UPLOAD_ROOT), bytes)
   const id = randomBytes(12).toString('hex')
   const file = path.join(UPLOAD_ROOT, `${id}.dump`)
   // A declared size is a promise: more than that is refused as well.
-  const guard = dumpGuard(bytes ? Math.min(maxBytes, bytes) : maxBytes)
+  const guard = dumpGuard(bytes ? Math.min(maxBytes, bytes) : maxBytes, engine)
   try {
     // The request stays out of the pipeline, so a refusal can still be answered on it.
     const writing = pipeline(guard, createWriteStream(file, { mode: 0o600 }))

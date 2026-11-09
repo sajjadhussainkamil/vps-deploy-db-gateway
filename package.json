@@ -11,6 +11,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "mysql2": "3.24.6",
     "postgres": "3.4.9",
     "zod": "3.25.76"
   },
